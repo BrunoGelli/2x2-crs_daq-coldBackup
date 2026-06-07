@@ -1,0 +1,12 @@
+{
+    "configs": {
+        "1": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m0",
+        "2": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m0",
+        "7": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m3",
+        "3": "asic_configs/asic_configs-2024_03_12_13_09_40_CDT/m1",
+        "8": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m3",
+        "4": "asic_configs/asic_configs-2024_03_12_13_09_40_CDT/m1",
+        "5": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m2",
+        "6": "asic_configs/asic_configs-2024_03_12_13_07_25_CDT/m2"
+    }
+}

@@ -1,0 +1,16 @@
+bin
+*.swp
+__py*
+__build*
+*.pyc
+*.log
+.cache
+build
+dist
+*.egg-info
+docs/_build
+*.json
+datalog
+*.dat
+*.root
+*.h5

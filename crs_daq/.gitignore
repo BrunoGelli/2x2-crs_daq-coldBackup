@@ -1,0 +1,25 @@
+# Python/cache
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.crsvenv/
+venv/
+.venv/
+
+# Data/logs
+*.h5
+*.hdf5
+*.root
+*.dat
+*.bin
+*.log
+
+# Secrets/config-ish
+.env
+*.pem
+*.key
+*.crt
+*.p12

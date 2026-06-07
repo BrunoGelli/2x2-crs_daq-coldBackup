@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+
+import argparse
+import time
+
+import h5py
+
+import larpix
+import larpix.format.rawhdf5format
+import larpix.format.pacman_msg_format
+import larpix.format.hdf5format
+from larpix.format.rawhdf5format import from_rawfile, len_rawfile
+from larpix.format.pacman_msg_format import parse
+from larpix.format.hdf5format import to_file
+from larpix.format.hdf5format_direct import to_file_direct
+
+def main(input_filename, output_filename, block_size, direct, max_blocks):
+    total_messages = len_rawfile(input_filename)
+    total_blocks = total_messages // block_size + 1
+    if max_blocks != -1:
+        total_blocks = min(max_blocks, total_blocks)
+    last = time.time()
+    for i_block in range(total_blocks):
+        start = i_block * block_size
+        end = min(start + block_size, total_messages)
+        if start == end: return
+
+        if time.time() > last + 1:
+            print('reading block {} of {}...\r'.format(i_block+1,total_blocks),end='')
+            last = time.time()
+        rd = from_rawfile(input_filename, start=start, end=end)
+        if direct:
+            to_file_direct(output_filename, rd['msgs'], rd['msg_headers']['io_groups'])
+        else:
+            pkts = list()
+            for i_msg,data in enumerate(zip(rd['msg_headers']['io_groups'], rd['msgs'])):
+                io_group,msg = data
+                pkts.extend(parse(msg, io_group=io_group))
+            to_file(output_filename, packet_list=pkts)
+
+    # Copy the embedded ASIC config tarball, if it exists
+    with h5py.File(input_filename) as f_in:
+        if 'daq_configs' in f_in:
+            with h5py.File(output_filename, 'a') as f_out:
+                f_in.copy('daq_configs', f_out)
+
+    print()
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input_filename', '-i', type=str, help='''Input hdf5 file, formatted with larpix.format.rawhdf5format using the larpix.io.PACMAN_IO class''')
+    parser.add_argument('--output_filename', '-o', type=str, help='''Output hdf5 file,
+        to be formatted with larpix.format.hdf5format''')
+    parser.add_argument('--block_size', default=10240, type=int, help='''Max number of messages to store in working memory (default=%(default)s)''')
+    parser.add_argument('--direct', action='store_true', help='Enable direct conversion (experimental)')
+    parser.add_argument('--max_blocks', type=int, default=-1)
+    args = parser.parse_args()
+    c = main(**vars(args))

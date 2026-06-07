@@ -1,0 +1,8 @@
+{
+    "_config_type": "io",
+    "io_class": "PACMAN_IO",
+    "io_group": [
+	[6, "192.168.197.53"]
+    ]
+    
+}

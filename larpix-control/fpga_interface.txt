@@ -1,0 +1,37 @@
+Interface specification between larpix-control and FPGA
+=======================================================
+
+This specification defines how the FPGA will interpret data sent by the
+larpix-control software and vice versa.
+
+Communications are sent via an RS-232 link with the least significant
+byte sent first. Each message consists of 10-byte packets with the
+following structure:
+
+Byte 0: Start byte 0x73 (ASCII 's')
+
+Bytes 1-7: LArPix UART data, aka the data payload to/from LArPix, with
+the following structure:
+
+  Byte 1: UART[7:0]
+  Byte 2: UART[15:8]
+  .
+  .
+  Byte 6: UART[47:40]
+  Byte 7: Bits [5:0] contain UART[53:48]. Bits [7:6] are reserved.
+
+Byte 8: Reserved
+
+Byte 9: Quit byte 0x71 (ASCII 'q')
+
+## Error cases
+
+1. Byte 0 is not the start byte.
+
+2. Byte 9 is not the quit byte.
+
+In both of these cases, ignore all incoming data until a start byte
+followed by 8 bytes followed by an end byte is received (since those 10
+bytes constitute a complete packet).
+
+There is currently no error correction or acknowledgement of receipt.

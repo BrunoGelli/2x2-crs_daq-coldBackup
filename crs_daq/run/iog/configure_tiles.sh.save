@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -uo pipefail  # avoid silent exits on arithmetic tests
+
+# Usage:
+#   ./configure_tiles.sh <IO_GROUP> <TILES_CSV> <SOURCE_CONFIG_DIR>
+# Example:
+#   ./configure_tiles.sh 7 7,8 /data/CRS/asic_configs/ParameterScan/NominalConfigs
+
+IOG="${1:?need IO group 1-8}"
+TILES_CSV="${2:?need tiles list like 7 or 7,8}"
+SRC_DIR="${3:?need source config dir (contains m0..m3)}"
+
+die(){ echo "[err] $*" >&2; exit 1; }
+
+# Resolve this script's directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Locate configure.sh and remember its directory (repo root)
+CONFIGURE_SH=""
+for c in \
+  "$SCRIPT_DIR/../../configure.sh" \
+  "$SCRIPT_DIR/../configure.sh" \
+  "$SCRIPT_DIR/../../../configure.sh" \
+  "$SCRIPT_DIR/../../../../configure.sh" \
+  "./configure.sh"
+do
+  if [[ -x "$c" ]]; then CONFIGURE_SH="$c"; break; fi
+done
+[[ -n "$CONFIGURE_SH" ]] || die "couldn't find executable configure.sh; edit search paths above."
+CONFIGURE_DIR="$(cd "$(dirname "$CONFIGURE_SH")" && pwd)"
+
+# Parse tiles
+IFS=',' read -r -a TILES <<< "$TILES_CSV"
+for t in "${TILES[@]}"; do [[ "$t" =~ ^[0-9]+$ ]] || die "tiles must be integers (got '$t')"; done
+[[ "$IOG" =~ ^[1-8]$ ]] || die "IO group must be 1..8"
+
+# Map IOG → m-subdir
+case "$IOG" in
+  1|2) SUBDIR="m0" ;; 3|4) SUBDIR="m1" ;; 5|6) SUBDIR="m2" ;; 7|8) SUBDIR="m3" ;;
+esac
+
+SRC_SUB="$SRC_DIR/$SUBDIR"
+[[ -d "$SRC_SUB" ]] || die "missing '$SRC_SUB'"
+
+stamp="$(date +%Y_%m_%d_%H_%M_%S_%Z)"
+OUT_ROOT="tmp/asic_configs_tiles-$stamp"
+OUT_SUB="$OUT_ROOT/$SUBDIR"
+mkdir -p "$OUT_SUB" || die "cannot create '$OUT_SUB'"
+
+echo "[info] source: $SRC_SUB"
+echo "[info] io_group: $IOG   tiles: ${TILES_CSV}   → subdir: $SUBDIR"
+echo "[info] output:  $OUT_SUB"
+
+copied=0
+shopt -s nullglob
+
+for t in "${TILES[@]}"; do
+  base=$(( 4 * (t - 1) ))   # tile T → channels base+{1,2,3,4}
+  for offset in 1 2 3 4; do
+    ch=$(( base + offset ))
+    matches=( "$SRC_SUB/config_${IOG}-${ch}-"*.json )
+    if (( ${#matches[@]} == 0 )); then
+      echo "[warn] no files for tile $t (io_channel $ch) in $SRC_SUB"
+      continue
+    fi
+    for f in "${matches[@]}"; do
+      cp -p -- "$f" "$OUT_SUB/" || die "copy failed: $f"
+      ((copied++))
+    done
+  done
+done
+
+if (( copied == 0 )); then
+  die "no matching config files copied; check IOG/tiles/SRC_DIR and filename schema 'config_<IOG>-<io_channel>-<chip_id>.json'"
+fi
+
+# Make OUT_ROOT absolute, because we are about to cd into CONFIGURE_DIR
+if command -v realpath >/dev/null 2>&1; then
+  OUT_ROOT_ABS="$(realpath "$OUT_ROOT")"
+else
+  OUT_ROOT_ABS="$(cd "$OUT_ROOT" && pwd)"
+fi
+
+echo "[info] copied $copied file(s). Example files:"
+ls -1 "$OUT_SUB" | head -n 10 | sed 's/^/  - /'
+
+# Run configure.sh from its own directory so relative paths & .envrc are correct
+echo "[info] cd $CONFIGURE_DIR"
+cd "$CONFIGURE_DIR" || die "cd failed: $CONFIGURE_DIR"
+
+echo "[info] running: ./configure.sh $IOG $OUT_ROOT_ABS"
+./configure.sh "$IOG" "$OUT_ROOT_ABS" || die "configure.sh returned non-zero"
+
+# Print the PID it wrote to .envrc for this IOG and verify it's alive
+PID_LINE="$(grep -E "IOG${IOG}_PID=" .envrc || true)"
+echo "[info] .envrc line: ${PID_LINE:-'(not found)'}"
+if [[ -n "$PID_LINE" ]]; then
+  PID_VAL="${PID_LINE#*=}"
+  if [[ "$PID_VAL" =~ ^[0-9]+$ ]]; then
+    echo "[info] ps -fp $PID_VAL"
+    ps -fp "$PID_VAL" || echo "[warn] process $PID_VAL not found (may have exited quickly)"
+  fi
+fi
+
+echo "[ok] launched configure for io_group=$IOG on filtered config at $OUT_ROOT_ABS"
