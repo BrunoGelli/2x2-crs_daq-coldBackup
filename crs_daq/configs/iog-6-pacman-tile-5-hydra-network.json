@@ -174,7 +174,7 @@
                     {
                         "chip_id": 25,
                         "miso_us": [
-                            15,
+                            null,
                             null,
                             null,
                             26
@@ -193,7 +193,7 @@
                         "chip_id": 16,
                         "miso_us": [
                             null,
-                            null,
+                            15,
                             null,
                             17
                         ]
@@ -617,7 +617,7 @@
                         "miso_us": [
                             null,
                             null,
-                            null,
+                            98,
                             null
                         ]
                     },
@@ -650,6 +650,15 @@
                     },
                     {
                         "chip_id": 90,
+                        "miso_us": [
+                            null,
+                            null,
+                            null,
+                            null
+                        ]
+                    },
+                    {
+                        "chip_id": 98,
                         "miso_us": [
                             null,
                             null,
@@ -809,7 +818,7 @@
                     {
                         "chip_id": 108,
                         "miso_us": [
-                            98,
+                            null,
                             null,
                             null,
                             109
@@ -822,15 +831,6 @@
                             null,
                             null,
                             110
-                        ]
-                    },
-                    {
-                        "chip_id": 98,
-                        "miso_us": [
-                            null,
-                            null,
-                            null,
-                            null
                         ]
                     },
                     {
@@ -884,21 +884,25 @@
     },
     "missing": {
         "6": {
-            "20": {
-                "82": [
-                    0
-                ],
-                "98": [
-                    1
-                ]
-            },
             "19": {
+                "15": [
+                    1
+                ],
                 "69": [
                     3,
                     0
                 ],
                 "98": [
                     3
+                ]
+            },
+            "20": {
+                "82": [
+                    0
+                ],
+                "98": [
+                    1,
+                    1
                 ]
             }
         }
