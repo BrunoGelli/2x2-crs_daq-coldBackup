@@ -5,6 +5,7 @@ warnings.filterwarnings("ignore")
 import argparse, csv, json, sys, traceback
 from collections import defaultdict
 from datetime import datetime, timezone
+import networkx as nx
 import larpix, larpix.io
 
 from base import network_base, pacman_base, utility_base, enforce_parallel
@@ -26,15 +27,32 @@ def _keys_for_tiles_from_controller(controller, io_group, tiles_set):
             keys.append(k)
     return keys
 
-def _group_by_network(keys):
-    # list[list(Key,...)] grouped by (io_group, io_channel), sorted by chip_id
+def _group_by_network(keys, controller=None):
+    # list[list(Key,...)] grouped by (io_group, io_channel). Prefer the
+    # controller's root-first network traversal because enforce_parallel expects
+    # each link to be ordered from the root chip outward.
     grouped = defaultdict(list)
     for k in keys:
         grouped[(k.io_group, k.io_channel)].append(k)
+
     nets = []
-    for net in grouped.values():
-        net.sort(key=lambda kk: kk.chip_id)
-        nets.append(net)
+    for (io_group, io_channel), net in grouped.items():
+        requested = {(k.io_group, k.io_channel, k.chip_id): k for k in net}
+        ordered = []
+        if controller is not None:
+            try:
+                for key in controller.get_network_keys(io_group, io_channel, root_first_traversal=True):
+                    requested_key = (key.io_group, key.io_channel, key.chip_id)
+                    if requested_key in requested:
+                        ordered.append(requested.pop(requested_key))
+            except Exception:
+                ordered = []
+        if requested:
+            ordered.extend(sorted(requested.values(), key=lambda kk: kk.chip_id))
+        if not ordered:
+            ordered = sorted(net, key=lambda kk: kk.chip_id)
+        nets.append(ordered)
+    nets.sort(key=lambda net: (net[0].io_group, net[0].io_channel) if net else (0, 0))
     return nets
 
 def _key_fields(key):
@@ -63,22 +81,42 @@ def _network_context(controller, key):
         graph = network.get('miso_us')
         if graph is None:
             return context
-        root_nodes = [node for node, attrs in graph.nodes(data=True)
-                      if attrs.get('root') and node != 'ext']
+
+        # The CRS network JSON marks the external PACMAN node ("ext") as root,
+        # not the ASIC root chip. Infer the root ASIC from the ext -> chip edge.
+        root_nodes = []
+        try:
+            root_nodes = [node for node, attrs in graph.nodes(data=True)
+                          if attrs.get('root') and isinstance(node, int)]
+        except Exception:
+            root_nodes = []
+        if not root_nodes:
+            try:
+                root_nodes = [dst for _, dst in graph.out_edges('ext') if isinstance(dst, int)]
+            except Exception:
+                root_nodes = []
+        if not root_nodes:
+            try:
+                root_nodes = [src for src, _ in graph.in_edges('ext') if isinstance(src, int)]
+            except Exception:
+                root_nodes = []
+
         if root_nodes:
             context['root_chip'] = root_nodes[0]
-            try:
-                context['network_path'] = list(graph.shortest_path(context['root_chip'], key.chip_id))
-            except AttributeError:
-                # networkx Graph/DiGraph exposes shortest paths via module functions,
-                # but some larpix graph wrappers expose it as a method.
+            if context['root_chip'] == key.chip_id:
+                context['network_path'] = [key.chip_id]
+            else:
                 try:
-                    import networkx as nx
-                    context['network_path'] = list(nx.shortest_path(graph, context['root_chip'], key.chip_id))
+                    context['network_path'] = list(graph.shortest_path(context['root_chip'], key.chip_id))
+                except AttributeError:
+                    # networkx Graph/DiGraph exposes shortest paths via module functions,
+                    # but some larpix graph wrappers expose it as a method.
+                    try:
+                        context['network_path'] = list(nx.shortest_path(graph, context['root_chip'], key.chip_id))
+                    except Exception:
+                        context['network_path'] = None
                 except Exception:
                     context['network_path'] = None
-            except Exception:
-                context['network_path'] = None
     except Exception:
         pass
     return context
@@ -350,7 +388,7 @@ def main():
     if not keys_flat:
         print("[ERR] No chips discovered on requested tiles; cannot enforce."); sys.exit(2)
 
-    network_keys = _group_by_network(keys_flat)
+    network_keys = _group_by_network(keys_flat, controller=c)
 
     if args.verbose:
         print(f"[keys] {len(keys_flat)} chip(s) across {len(network_keys)} link(s) "
