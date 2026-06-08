@@ -244,6 +244,12 @@ def _write_debug_reports(rows, args, metadata):
                 writer.writerow(safe_row)
         print(f"[debug] wrote CSV report: {args.debug_report_csv}")
 
+def _read_pacman_reg(io, reg, io_group):
+    try:
+        return io.get_reg(reg, io_group=io_group)
+    except Exception as exc:
+        return f'{exc.__class__.__name__}: {exc}'
+
 def _print_summary(rows, io_group, tiles):
     print(f"\nNetwork enforcement summary: io_group={io_group} tiles={tiles}\n")
     columns = ['io_channel', 'root_chip', 'chip_id', 'operation', 'status', 'details']
@@ -286,7 +292,9 @@ def main():
     ap.add_argument('--debug-report-csv', type=str, default=None,
                     help='Write machine-readable CSV diagnostic report.')
     ap.add_argument('--exclusive-uart', action='store_true', default=False,
-                    help='Enable UART exclusively for these tiles (others disabled).')
+                    help='Deprecated alias for the default targeted UART enable behavior.')
+    ap.add_argument('--skip-uart-enable', action='store_true', default=False,
+                    help='Do not enable PACMAN UART RX for the requested tiles before enforcement.')
     args = ap.parse_args()
 
     io_group = args.io_group
@@ -310,17 +318,31 @@ def main():
     # Restricted bring-up for ONLY these tiles
     if io_group_asic_version_[io_group] == '2b':
         if args.verbose: print('init network_v2b (restricted)')
-        c = network_base.network_v2b(ctrl_cfg[str(io_group)], tiles=tiles, io_group=io_group)
+        c = network_base.network_v2b(ctrl_cfg[str(io_group)], tiles=tiles, io_group=io_group,
+                                     pacman_config=args.pacman_config)
     elif io_group_asic_version_[io_group] in [2, 'lightpix-1']:
         if args.verbose: print('init network_v2a (restricted)')
-        c = network_base.network_v2a(ctrl_cfg[str(io_group)], tiles=tiles, io_group=io_group)
+        c = network_base.network_v2a(ctrl_cfg[str(io_group)], tiles=tiles, io_group=io_group,
+                                     pacman_config=args.pacman_config)
     else:
         raise RuntimeError(f"Unknown ASIC version for io_group {io_group}: {io_group_asic_version_[io_group]}")
 
-    # Optional UART isolation (will silence other tiles)
-    if args.exclusive_uart:
-        if args.verbose: print('[UART] exclusive enable for these tiles (others disabled)')
+    uart_rx_mask_before = _read_pacman_reg(c.io, 0x18, io_group)
+    # Match network_single.py/network_larpix.py: enable PACMAN UART RX for the
+    # channels we are about to verify. A zero/stale RX mask makes every chip look
+    # unconfigured even if hydra discovery just succeeded.
+    if args.skip_uart_enable:
+        if args.verbose:
+            print(f'[UART] leaving PACMAN UART RX mask unchanged: {uart_rx_mask_before}')
+    else:
+        if args.verbose:
+            mode = 'exclusive/targeted' if args.exclusive_uart else 'targeted'
+            print(f'[UART] enabling {mode} UART RX for io_group={io_group}, tiles={tiles} '
+                  f'(mask before={uart_rx_mask_before})')
         pacman_base.enable_pacman_uart_from_tile(c.io, io_group, tiles)
+    uart_rx_mask_after = _read_pacman_reg(c.io, 0x18, io_group)
+    if args.verbose:
+        print(f'[UART] PACMAN UART RX mask after setup: {uart_rx_mask_after}')
 
     # Build chip set for the union of requested tiles
     tiles_set = set(tiles)
@@ -350,6 +372,9 @@ def main():
             'continue_on_error': args.continue_on_error,
             'max_retries': args.max_retries if args.max_retries is not None else args.retries,
             'ok': ok,
+            'uart_rx_mask_before': uart_rx_mask_before,
+            'uart_rx_mask_after': uart_rx_mask_after,
+            'uart_enable_skipped': args.skip_uart_enable,
         }
         _print_summary(rows, io_group, tiles)
         _write_debug_reports(rows, args, metadata)
