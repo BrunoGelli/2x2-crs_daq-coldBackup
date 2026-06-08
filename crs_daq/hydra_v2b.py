@@ -37,6 +37,47 @@ _default_i_rx=8
 _default_recheck=False
 v2b_root_ids=[21, 41, 71, 91]
 
+def _parse_csv_ints(value):
+    if value is None:
+        return None
+    values = []
+    for item in str(value).split(','):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return sorted(set(values))
+
+def _excluded_chips_for_tile(io_group, tile):
+    try:
+        exclude_entry = iog_exclude.get(io_group, None)
+    except Exception:
+        return set()
+    if exclude_entry is None:
+        return set()
+    if isinstance(exclude_entry, dict):
+        excluded = exclude_entry.get(str(tile), exclude_entry.get(tile, []))
+    else:
+        excluded = exclude_entry
+    if excluded is None:
+        return set()
+    if isinstance(excluded, str):
+        excluded = [item.strip() for item in excluded.split(',') if item.strip()]
+    if isinstance(excluded, int):
+        excluded = [excluded]
+    return set(int(chip_id) for chip_id in excluded)
+
+def _exclude_for_network_base(io_group, tile):
+    return {str(tile): sorted(_excluded_chips_for_tile(io_group, tile))}
+
+def _ensure_empty_network_entries(c, iog, io_channels):
+    if not hasattr(c, 'network') or c.network is None:
+        c.network = {}
+    if iog not in c.network or c.network[iog] is None:
+        c.network[iog] = {}
+    for io_channel in io_channels:
+        if io_channel not in c.network[iog]:
+            c.network[iog][io_channel] = {'miso_us': [], 'miso_ds': [], 'mosi': []}
+
 def main(io_group, file_prefix=_default_file_prefix, \
          disable_logger=_default_disable_logger, \
          verbose=_default_verbose, \
@@ -46,6 +87,7 @@ def main(io_group, file_prefix=_default_file_prefix, \
          r_term=_default_r_term, \
          i_rx=_default_i_rx,
          pacman_tile=None,\
+         io_channels=None,\
          **kwargs):
    
     c = larpix.Controller()
@@ -75,13 +117,27 @@ def main(io_group, file_prefix=_default_file_prefix, \
                 tiles = io_group_pacman_tile_[iog]
             else:
                 tiles = [pacman_tile]
+            requested_io_channels = _parse_csv_ints(io_channels)
             for tile in tiles:
 
-                root_keys=[]        
-                io_channels = utility_base.tile_to_io_channel([tile])
-                for io_channel in io_channels:
+                root_keys=[]
+                tile_io_channels = utility_base.tile_to_io_channel([tile])
+                if requested_io_channels is not None:
+                    invalid_io_channels = sorted(set(requested_io_channels) - set(tile_io_channels))
+                    if invalid_io_channels:
+                        raise RuntimeError(
+                            f'Requested io_channel(s) {invalid_io_channels} are not in tile {tile}; '
+                            f'valid channels are {tile_io_channels}'
+                        )
+                    tile_io_channels = [ioc for ioc in tile_io_channels if ioc in requested_io_channels]
+                tile_excluded_chips = _excluded_chips_for_tile(iog, tile)
+                exclude_for_network_base = _exclude_for_network_base(iog, tile)
+                for io_channel in tile_io_channels:
                     c.io.set_uart_clock_ratio(io_channel, 10, io_group=iog)
                     cid =  v2b_root_ids[ (io_channel-1) % 4]
+                    if cid in tile_excluded_chips:
+                        print(f'Skipping excluded ROOT chip {cid} on io_group={iog}, tile={tile}, io_channel={io_channel}')
+                        continue
                     network_base.network_ext_node_from_tuple(c, iog, io_channel, cid)
                     candidate_root = network_base.setup_root(c, c.io, iog, \
                                                           io_channel,\
@@ -92,6 +148,7 @@ def main(io_group, file_prefix=_default_file_prefix, \
            
                 print('ROOT KEYS: ',root_keys)
 
+                unconfigured=[]
                 iog_tile_to_root_keys=utility_base.partition_chip_keys_by_io_group_tile(root_keys)
                 print(iog_tile_to_root_keys)
                 for iog_tile in iog_tile_to_root_keys.keys():
@@ -99,18 +156,18 @@ def main(io_group, file_prefix=_default_file_prefix, \
                                              iog_tile_to_root_keys[iog_tile], \
                                              verbose, \
                                              io_group_asic_version_[iog], ref_current_trim, \
-                                             tx_diff, tx_slice, r_term, i_rx, exclude=iog_exclude[iog])
-                    unconfigured=[]
+                                             tx_diff, tx_slice, r_term, i_rx, exclude=exclude_for_network_base)
                     if True:
                             
                         out_of_network=network_base.iterate_waitlist(c, c.io, iog, \
-                                                                 utility_base.tile_to_io_channel([tile]),
+                                                                 tile_io_channels,
                                                                  verbose, \
                                                                  io_group_asic_version_[iog], \
                                                                  ref_current_trim,\
                                                                  tx_diff, tx_slice, \
-                                                                 r_term, i_rx, exclude=iog_exclude[iog])
+                                                                 r_term, i_rx, exclude=exclude_for_network_base)
                         unconfigured.extend(out_of_network)
+                _ensure_empty_network_entries(c, iog, utility_base.tile_to_io_channel([tile]))
                 if _file_prefix is None: file_prefix='iog-{}-pacman-tile-{}-hydra-network'.format(iog, tile) 
                 network_file = network_base.write_network_to_file(c, file_prefix, {io_group : [tile] },\
                                        unconfigured)
@@ -125,6 +182,8 @@ if __name__=='__main__':
                         type=int, help='''io group to network''')
     parser.add_argument('--pacman_tile', default=None, \
                         type=int, help='''PACMAN tile to work with''') 
+    parser.add_argument('--io_channels', '--io-channels', dest='io_channels', default=None, type=str,
+                        help='''Optional CSV of PACMAN io_channels to discover, e.g. 20 or 18,20''')
     parser.add_argument('--file_prefix', default=_default_file_prefix, \
                         type=str, help='''String prepended to filename''')
     parser.add_argument('--disable_logger', default=_default_disable_logger, \
