@@ -27,6 +27,69 @@ def _keys_for_tiles_from_controller(controller, io_group, tiles_set):
             keys.append(k)
     return keys
 
+def _parse_csv_ints(value):
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return [value]
+    values = []
+    for item in str(value).split(','):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return sorted(set(values))
+
+def _excluded_chips_for_tile(io_group, tile):
+    try:
+        exclude_entry = iog_exclude.get(io_group, None)
+    except Exception:
+        return set()
+    if exclude_entry is None:
+        return set()
+    if isinstance(exclude_entry, dict):
+        excluded = exclude_entry.get(str(tile), exclude_entry.get(tile, []))
+    else:
+        excluded = exclude_entry
+    if excluded is None:
+        return set()
+    if isinstance(excluded, str):
+        excluded = [item.strip() for item in excluded.split(',') if item.strip()]
+    if isinstance(excluded, int):
+        excluded = [excluded]
+    return set(int(chip_id) for chip_id in excluded)
+
+def _filter_keys_by_io_channels(keys, io_channels):
+    if io_channels is None:
+        return keys
+    requested = set(io_channels)
+    return [key for key in keys if key.io_channel in requested]
+
+def _filter_networks_by_excluded_roots(controller, network_keys, include_excluded_roots=False, verbose=False):
+    if include_excluded_roots:
+        return network_keys, []
+
+    filtered_networks = []
+    skipped_rows = []
+    for net in network_keys:
+        if not net:
+            continue
+        first_key = net[0]
+        tile = utility_base.io_channel_to_tile(first_key.io_channel)
+        excluded_chips = _excluded_chips_for_tile(first_key.io_group, tile)
+        root_chip = _network_context(controller, first_key).get('root_chip')
+        if root_chip in excluded_chips:
+            if verbose:
+                print(f"[exclude] skipping io_group={first_key.io_group} tile={tile} "
+                      f"io_channel={first_key.io_channel}: root chip {root_chip} is in RUN_CONFIG iog_exclude")
+            for key in net:
+                skipped_rows.append(_make_row(
+                    controller, key, 'enforce_parallel', 'SKIPPED',
+                    details=f'root chip {root_chip} is excluded in RUN_CONFIG for tile {tile}'
+                ))
+            continue
+        filtered_networks.append(net)
+    return filtered_networks, skipped_rows
+
 def _group_by_network(keys, controller=None):
     # list[list(Key,...)] grouped by (io_group, io_channel). Prefer the
     # controller's root-first network traversal because enforce_parallel expects
@@ -317,6 +380,8 @@ def main():
     # single-tile (backward-compat) OR multi-tile CSV
     ap.add_argument('--pacman_tile', type=int, default=None, help='Single tile')
     ap.add_argument('--tiles', type=str, default=None, help='CSV of tiles, e.g. "1,3,5"')
+    ap.add_argument('--io-channels', '--io_channels', dest='io_channels', type=str, default=None,
+                    help='Optional CSV of PACMAN io_channels to enforce, e.g. "20" or "18,20".')
     ap.add_argument('--controller_config', type=str, required=True)
     ap.add_argument('--pacman_config', type=str, required=True)
     ap.add_argument('--retries', type=int, default=2,
@@ -333,6 +398,8 @@ def main():
                     help='Deprecated alias for the default targeted UART enable behavior.')
     ap.add_argument('--skip-uart-enable', action='store_true', default=False,
                     help='Do not enable PACMAN UART RX for the requested tiles before enforcement.')
+    ap.add_argument('--include-excluded-roots', action='store_true', default=False,
+                    help='Do not skip io_channels whose root chip is listed in RUN_CONFIG iog_exclude.')
     args = ap.parse_args()
 
     io_group = args.io_group
@@ -344,6 +411,15 @@ def main():
     else:
         print("Provide --pacman_tile N or --tiles CSV"); sys.exit(1)
 
+    requested_io_channels = _parse_csv_ints(args.io_channels)
+    if requested_io_channels is not None:
+        valid_io_channels = set(utility_base.tile_to_io_channel(tiles))
+        invalid_io_channels = sorted(set(requested_io_channels) - valid_io_channels)
+        if invalid_io_channels:
+            print(f"[ERR] Requested io_channel(s) {invalid_io_channels} are not in requested tiles {tiles}; "
+                  f"valid channels are {sorted(valid_io_channels)}")
+            sys.exit(1)
+
     pacman_cfg = _load_json(args.pacman_config)
     ctrl_cfg = _load_json(args.controller_config)
 
@@ -351,7 +427,8 @@ def main():
         print('Missing io_group in PACMAN config file!'); sys.exit(1)
 
     if args.verbose:
-        print(f"Configuring io_group={io_group}, tiles={tiles} (targeted; no global re-network)")
+        print(f"Configuring io_group={io_group}, tiles={tiles}, io_channels={requested_io_channels or 'all'} "
+              f"(targeted; no global re-network)")
 
     # Restricted bring-up for ONLY these tiles
     if io_group_asic_version_[io_group] == '2b':
@@ -385,26 +462,35 @@ def main():
     # Build chip set for the union of requested tiles
     tiles_set = set(tiles)
     keys_flat = _keys_for_tiles_from_controller(c, io_group, tiles_set)
+    keys_flat = _filter_keys_by_io_channels(keys_flat, requested_io_channels)
     if not keys_flat:
-        print("[ERR] No chips discovered on requested tiles; cannot enforce."); sys.exit(2)
+        print("[ERR] No chips discovered on requested tiles/io_channels; cannot enforce."); sys.exit(2)
 
     network_keys = _group_by_network(keys_flat, controller=c)
+    network_keys, skipped_rows = _filter_networks_by_excluded_roots(
+        c, network_keys, include_excluded_roots=args.include_excluded_roots, verbose=args.verbose
+    )
 
     if args.verbose:
-        print(f"[keys] {len(keys_flat)} chip(s) across {len(network_keys)} link(s) "
-              f"for io_group={io_group}, tiles={tiles}")
+        print(f"[keys] {len(keys_flat)} chip(s) across {len(network_keys)} active link(s) "
+              f"for io_group={io_group}, tiles={tiles}, io_channels={requested_io_channels or 'all'}")
         for k in keys_flat[:8]:
             print(f"  - key(io_group={k.io_group}, io_channel={k.io_channel}, chip_id={k.chip_id})")
 
     diagnostic_mode = bool(args.continue_on_error or args.debug_report or args.debug_report_csv or args.max_retries is not None)
 
     if diagnostic_mode:
-        ok, diff, unconfigured, rows = _enforce_with_diagnostics(c, network_keys, args, io_group, tiles)
+        if network_keys:
+            ok, diff, unconfigured, rows = _enforce_with_diagnostics(c, network_keys, args, io_group, tiles)
+        else:
+            ok, diff, unconfigured, rows = True, {}, [], []
+        rows = skipped_rows + rows
         metadata = {
             'created_utc': datetime.now(timezone.utc).isoformat(),
             'command': sys.argv,
             'io_group': io_group,
             'tiles': tiles,
+            'io_channels': requested_io_channels,
             'controller_config': args.controller_config,
             'pacman_config': args.pacman_config,
             'continue_on_error': args.continue_on_error,
@@ -413,12 +499,17 @@ def main():
             'uart_rx_mask_before': uart_rx_mask_before,
             'uart_rx_mask_after': uart_rx_mask_after,
             'uart_enable_skipped': args.skip_uart_enable,
+            'include_excluded_roots': args.include_excluded_roots,
+            'skipped_root_excluded_rows': len(skipped_rows),
         }
         _print_summary(rows, io_group, tiles)
         _write_debug_reports(rows, args, metadata)
         if not ok:
             raise RuntimeError("Enforcement did not converge for the requested tiles", diff)
     else:
+        if not network_keys:
+            print('[ok] no active links to enforce after applying root-chip exclusions')
+            return
         # Enforce (no re-networking), with limited retries. This preserves the legacy behavior.
         ok, diff, unconfigured = enforce_parallel.enforce_parallel(
             c, network_keys, pbar_desc=f'io_group {io_group}, tiles {tiles}', pbar_position=0
